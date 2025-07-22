@@ -1,0 +1,69 @@
+import boto3
+import csv
+from datetime import datetime
+import os
+
+s3 = boto3.client('s3')
+dynamodb = boto3.resource('dynamodb')
+sns = boto3.client('sns')
+
+TOPIC_ARN = os.environ['SNS_TOPIC_ARN']
+TABLE_NAME = os.environ.get('TABLE_NAME', 'DisasterAlerts')
+
+def lambda_handler(event, context):
+    try:
+        bucket = event['Records'][0]['s3']['bucket']['name']
+        key = event['Records'][0]['s3']['object']['key']
+        response = s3.get_object(Bucket=bucket, Key=key)
+        lines = response['Body'].read().decode('utf-8').splitlines()
+        reader = csv.DictReader(lines)
+
+        table = dynamodb.Table(TABLE_NAME)
+        found_alerts = []
+
+        for row in reader:
+            if row['type'].lower() in ['earthquake', 'flood', 'cyclone']:
+                timestamp = datetime.utcnow().isoformat()
+                disaster_id = f"{row['type']}-{timestamp}"
+
+                alert = {
+                    'disaster_id': disaster_id,
+                    'type': row['type'],
+                    'location': row['location'],
+                    'severity': row['severity'],
+                    'description': row['description'],
+                    'timestamp': timestamp
+                }
+
+                # Save to DynamoDB
+                table.put_item(Item=alert)
+
+                # Add to alert list for SNS message
+                found_alerts.append(alert)
+
+        if found_alerts:
+            # Create detailed message
+            message = "🚨 Disaster Alerts Detected:\n\n"
+            for alert in found_alerts:
+                message += (
+                    f"Type: {alert['type']}\n"
+                    f"Location: {alert['location']}\n"
+                    f"Severity: {alert['severity']}\n"
+                    f"Description: {alert['description']}\n"
+                    f"Time: {alert['timestamp']}\n"
+                    f"{'-'*30}\n"
+                )
+        else:
+            message = "✅ No disaster found in the uploaded file."
+
+        sns.publish(
+            TopicArn=TOPIC_ARN,
+            Subject="Disaster Alert System",
+            Message=message
+        )
+
+        return {'status': 'success'}
+
+    except Exception as e:
+        print(str(e))
+        raise e
